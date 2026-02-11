@@ -10,6 +10,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime, timedelta
 import time
 import os
+import re
 
 # Настройки Selenium
 chrome_options = Options()
@@ -113,36 +114,127 @@ def parse_team_sport(url, night_games=False):
     return matches
 
 def parse_tennis():
+    print(f"🔄 Загружаем страницу: {URLS['tennis']}")
     driver.get(URLS["tennis"])
     time.sleep(3)
 
     try:
         wait = WebDriverWait(driver, 30)
-        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "mc-sport-tournament")))
+        # Страница тенниса рендерится JS-ом: надёжнее ждать сами матчи.
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".tennis-results.js-match-item")))
     except:
-        print(f"❌ Данные по теннису не загрузились!")
+        print("❌ Данные по теннису не загрузились!")
         return []
 
+    time_re = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+
+    def _norm_text(s) -> str:
+        return " ".join(s.split()) if s else ""
+
+    def _safe_text(el) -> str:
+        """
+        Selenium `.text` возвращает только «видимый» текст и на Championat
+        иногда бывает пустым из-за оптимизаций рендера. `textContent` стабильнее.
+        """
+        try:
+            tc = el.get_attribute("textContent")
+        except Exception:
+            tc = None
+        tc = _norm_text(tc)
+        if tc:
+            return tc
+        try:
+            return _norm_text(el.text)
+        except Exception:
+            return ""
+
+    def _extract_time(match_el) -> str:
+        # Актуальная разметка: время лежит в `.tennis-results__item._time`.
+        for sel in (".tennis-results__item._time", ".tennis-results__time", ".results-item__title-date"):
+            try:
+                txt = _safe_text(match_el.find_element(By.CSS_SELECTOR, sel))
+            except Exception:
+                continue
+            m = time_re.search(txt)
+            if m:
+                return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+        # Редкий фолбэк — если время попало в статус/примечание.
+        try:
+            txt = _safe_text(match_el.find_element(By.CSS_SELECTOR, ".tennis-results__status"))
+            m = time_re.search(txt)
+            if m:
+                return f"{int(m.group(1)):02d}:{m.group(2)}"
+        except Exception:
+            pass
+
+        return "00:00"
+
+    def _extract_player_name(player_el) -> str:
+        first = ""
+        surname = ""
+
+        for sel in (
+            ".tennis-results__player-name._complete",
+            ".tennis-results__player-name._initial",
+            ".tennis-results__player-name",
+        ):
+            try:
+                first = _safe_text(player_el.find_element(By.CSS_SELECTOR, sel))
+            except Exception:
+                first = ""
+            if first:
+                break
+
+        try:
+            surname = _safe_text(player_el.find_element(By.CSS_SELECTOR, ".tennis-results__player-surname"))
+        except Exception:
+            surname = ""
+
+        full = " ".join([p for p in (first, surname) if p]).strip()
+        if full:
+            return full
+
+        # Последний фолбэк: берём заголовок игрока целиком.
+        try:
+            return _safe_text(player_el.find_element(By.CSS_SELECTOR, ".tennis-results__player-title"))
+        except Exception:
+            return ""
+
+    def _extract_team(team_el) -> str:
+        # В одиночке: 1 игрок; в паре: 2 игрока.
+        players = team_el.find_elements(By.CSS_SELECTOR, ".tennis-results__player")
+        names = []
+        for p in players:
+            name = _extract_player_name(p)
+            if name:
+                names.append(name)
+        if names:
+            return " / ".join(names)
+
+        # Фолбэк для редких раскладок (командные соревнования и т.п.)
+        return _safe_text(team_el)
+
     matches = []
-    match_elements = driver.find_elements(By.CLASS_NAME, "tennis-results")
+    match_elements = driver.find_elements(By.CSS_SELECTOR, ".tennis-results.js-match-item")
 
     for match in match_elements:
         try:
-            status_element = match.find_element(By.CLASS_NAME, "tennis-results__status")
-            status = status_element.text.strip()
-            if status.lower() == "не начался":
-                players = match.find_elements(By.CLASS_NAME, "tennis-results__player-title")
-                player1 = f"{players[0].find_element(By.CLASS_NAME, 'tennis-results__player-name._complete').text.strip()} {players[0].find_element(By.CLASS_NAME, 'tennis-results__player-surname').text.strip()}"
-                player2 = f"{players[1].find_element(By.CLASS_NAME, 'tennis-results__player-name._complete').text.strip()} {players[1].find_element(By.CLASS_NAME, 'tennis-results__player-surname').text.strip()}"
+            status = _safe_text(match.find_element(By.CSS_SELECTOR, ".tennis-results__status")).strip()
+            if status.lower() != "не начался":
+                continue
 
-                # В теннисе время может быть в отдельном блоке (если его нет — ставим 00:00)
-                match_time = "00:00"
-                try:
-                    match_time = match.find_element(By.CLASS_NAME, "tennis-results__time").text.strip()
-                except:
-                    pass
+            teams = match.find_elements(By.CSS_SELECTOR, ".tennis-results__team")
+            if len(teams) < 2:
+                continue
 
-                matches.append((f"{player1} - {player2}", f"{current_date} {match_time}"))
+            team1 = _extract_team(teams[0])
+            team2 = _extract_team(teams[1])
+            if not team1 or not team2:
+                continue
+
+            match_time = _extract_time(match)
+            matches.append((f"{team1} - {team2}", f"{current_date} {match_time}"))
         except Exception as e:
             print(f"⚠️ Ошибка парсинга теннисного матча: {e}")
             continue

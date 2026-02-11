@@ -10,6 +10,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 from datetime import datetime, timedelta
 import time
 import os
+import re
 
 # Настройки Selenium
 chrome_options = Options()
@@ -113,36 +114,127 @@ def parse_team_sport(url, night_games=False):
     return matches
 
 def parse_tennis():
+    print(f"🔄 Загружаем страницу: {URLS['tennis']}")
     driver.get(URLS["tennis"])
     time.sleep(3)
 
     try:
         wait = WebDriverWait(driver, 30)
-        wait.until(EC.presence_of_element_located((By.CLASS_NAME, "mc-sport-tournament")))
+        # Страница тенниса рендерится JS-ом: надёжнее ждать сами матчи.
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".tennis-results.js-match-item")))
     except:
-        print(f"❌ Данные по теннису не загрузились!")
+        print("❌ Данные по теннису не загрузились!")
         return []
 
+    time_re = re.compile(r"\b(\d{1,2}):(\d{2})\b")
+
+    def _norm_text(s) -> str:
+        return " ".join(s.split()) if s else ""
+
+    def _safe_text(el) -> str:
+        """
+        Selenium `.text` возвращает только «видимый» текст и на Championat
+        иногда бывает пустым из-за оптимизаций рендера. `textContent` стабильнее.
+        """
+        try:
+            tc = el.get_attribute("textContent")
+        except Exception:
+            tc = None
+        tc = _norm_text(tc)
+        if tc:
+            return tc
+        try:
+            return _norm_text(el.text)
+        except Exception:
+            return ""
+
+    def _extract_time(match_el) -> str:
+        # Актуальная разметка: время лежит в `.tennis-results__item._time`.
+        for sel in (".tennis-results__item._time", ".tennis-results__time", ".results-item__title-date"):
+            try:
+                txt = _safe_text(match_el.find_element(By.CSS_SELECTOR, sel))
+            except Exception:
+                continue
+            m = time_re.search(txt)
+            if m:
+                return f"{int(m.group(1)):02d}:{m.group(2)}"
+
+        # Редкий фолбэк — если время попало в статус/примечание.
+        try:
+            txt = _safe_text(match_el.find_element(By.CSS_SELECTOR, ".tennis-results__status"))
+            m = time_re.search(txt)
+            if m:
+                return f"{int(m.group(1)):02d}:{m.group(2)}"
+        except Exception:
+            pass
+
+        return "00:00"
+
+    def _extract_player_name(player_el) -> str:
+        first = ""
+        surname = ""
+
+        for sel in (
+            ".tennis-results__player-name._complete",
+            ".tennis-results__player-name._initial",
+            ".tennis-results__player-name",
+        ):
+            try:
+                first = _safe_text(player_el.find_element(By.CSS_SELECTOR, sel))
+            except Exception:
+                first = ""
+            if first:
+                break
+
+        try:
+            surname = _safe_text(player_el.find_element(By.CSS_SELECTOR, ".tennis-results__player-surname"))
+        except Exception:
+            surname = ""
+
+        full = " ".join([p for p in (first, surname) if p]).strip()
+        if full:
+            return full
+
+        # Последний фолбэк: берём заголовок игрока целиком.
+        try:
+            return _safe_text(player_el.find_element(By.CSS_SELECTOR, ".tennis-results__player-title"))
+        except Exception:
+            return ""
+
+    def _extract_team(team_el) -> str:
+        # В одиночке: 1 игрок; в паре: 2 игрока.
+        players = team_el.find_elements(By.CSS_SELECTOR, ".tennis-results__player")
+        names = []
+        for p in players:
+            name = _extract_player_name(p)
+            if name:
+                names.append(name)
+        if names:
+            return " / ".join(names)
+
+        # Фолбэк для редких раскладок (командные соревнования и т.п.)
+        return _safe_text(team_el)
+
     matches = []
-    match_elements = driver.find_elements(By.CLASS_NAME, "tennis-results")
+    match_elements = driver.find_elements(By.CSS_SELECTOR, ".tennis-results.js-match-item")
 
     for match in match_elements:
         try:
-            status_element = match.find_element(By.CLASS_NAME, "tennis-results__status")
-            status = status_element.text.strip()
-            if status.lower() == "не начался":
-                players = match.find_elements(By.CLASS_NAME, "tennis-results__player-title")
-                player1 = f"{players[0].find_element(By.CLASS_NAME, 'tennis-results__player-name._complete').text.strip()} {players[0].find_element(By.CLASS_NAME, 'tennis-results__player-surname').text.strip()}"
-                player2 = f"{players[1].find_element(By.CLASS_NAME, 'tennis-results__player-name._complete').text.strip()} {players[1].find_element(By.CLASS_NAME, 'tennis-results__player-surname').text.strip()}"
+            status = _safe_text(match.find_element(By.CSS_SELECTOR, ".tennis-results__status")).strip()
+            if status.lower() != "не начался":
+                continue
 
-                # В теннисе время может быть в отдельном блоке (если его нет — ставим 00:00)
-                match_time = "00:00"
-                try:
-                    match_time = match.find_element(By.CLASS_NAME, "tennis-results__time").text.strip()
-                except:
-                    pass
+            teams = match.find_elements(By.CSS_SELECTOR, ".tennis-results__team")
+            if len(teams) < 2:
+                continue
 
-                matches.append((f"{player1} - {player2}", f"{current_date} {match_time}"))
+            team1 = _extract_team(teams[0])
+            team2 = _extract_team(teams[1])
+            if not team1 or not team2:
+                continue
+
+            match_time = _extract_time(match)
+            matches.append((f"{team1} - {team2}", f"{current_date} {match_time}"))
         except Exception as e:
             print(f"⚠️ Ошибка парсинга теннисного матча: {e}")
             continue
@@ -161,25 +253,144 @@ def save_matches_to_file(sport, matches):
     print(f"📂 Матчи сохранены в {file_name}")
 
 def update_google_sheets(all_sports):
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    # `worksheet.format()` (цвета/оформление) использует Sheets API,
+    # поэтому добавляем актуальный scope для таблиц.
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
     creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     client = gspread.authorize(creds)
 
     sheet = client.open("pars")
 
-    for sheet_name in SHEET_NAMES.values():
+    # Код спорта + форматирование отдельной колонки с обозначением.
+    # Цвета в формате Sheets API: 0..1
+    sport_meta = {
+        "football": {
+            "code": "f",
+            "format": {
+                "backgroundColor": {"red": 0.2039, "green": 0.6588, "blue": 0.3255},  # #34A853
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+                "textFormat": {
+                    "bold": True,
+                    "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                },
+            },
+        },
+        "hockey": {
+            "code": "h",
+            "format": {
+                "backgroundColor": {"red": 0.2588, "green": 0.5216, "blue": 0.9569},  # #4285F4
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+                "textFormat": {
+                    "bold": True,
+                    "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                },
+            },
+        },
+        "tennis": {
+            "code": "t",
+            "format": {
+                "backgroundColor": {"red": 1, "green": 0.5961, "blue": 0},  # #FF9800
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+                "textFormat": {
+                    "bold": True,
+                    "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                },
+            },
+        },
+    }
+
+    # 1) Очистка листов + заголовки
+    for base_sport, sheet_name in SHEET_NAMES.items():
         worksheet = sheet.worksheet(sheet_name)
         worksheet.clear()
-        worksheet.append_row(["Матч", "Дата и время"])
+        # Сбрасываем старые заливки/форматы, т.к. `clear()` чистит только значения.
+        try:
+            if base_sport in sport_meta:
+                worksheet.format(
+                    "A:C",
+                    {
+                        "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+                        "horizontalAlignment": "LEFT",
+                        "verticalAlignment": "MIDDLE",
+                        "textFormat": {
+                            "bold": False,
+                            "foregroundColor": {"red": 0, "green": 0, "blue": 0},
+                        },
+                    },
+                )
+            else:
+                worksheet.format(
+                    "A:B",
+                    {
+                        "backgroundColor": {"red": 1, "green": 1, "blue": 1},
+                        "horizontalAlignment": "LEFT",
+                        "verticalAlignment": "MIDDLE",
+                        "textFormat": {
+                            "bold": False,
+                            "foregroundColor": {"red": 0, "green": 0, "blue": 0},
+                        },
+                    },
+                )
+        except Exception:
+            # Если форматирование не доступно — просто пропускаем сброс.
+            pass
+
+        if base_sport in sport_meta:
+            # Важно: A1 не должна быть пустой, иначе при append_rows Google Sheets
+            # может считать таблицу начинающейся с B1 и все значения сдвинутся вправо.
+            worksheet.append_row(["Код", "Матч", "Дата и время"])
+        else:
+            worksheet.append_row(["Матч", "Дата и время"])
         print(f"✅ Очистили лист {sheet_name} перед парсингом.")
 
-    for sport, matches in all_sports.items():
-        sheet_name = SHEET_NAMES.get(sport.replace("_night", ""), "Лист1")
-        worksheet = sheet.worksheet(sheet_name)
-
+    # 2) Склеиваем дневные + ночные матчи по базовому виду спорта,
+    # чтобы аппендить одним батчем и удобно форматировать диапазон.
+    combined = {k: [] for k in SHEET_NAMES.keys()}
+    for sport_key, matches in all_sports.items():
+        base = sport_key.replace("_night", "")
+        if base not in combined:
+            combined[base] = []
         if matches:
+            combined[base].extend(matches)
+
+    # 3) Запись + форматирование
+    for base_sport, matches in combined.items():
+        sheet_name = SHEET_NAMES.get(base_sport)
+        if not sheet_name:
+            continue
+
+        worksheet = sheet.worksheet(sheet_name)
+        if not matches:
+            continue
+
+        if base_sport in sport_meta:
+            code = sport_meta[base_sport]["code"]
+            worksheet.append_rows([[code, teams, match_dt] for teams, match_dt in matches])
+
+            # Форматируем только заполненные строки в колонке с кодом.
+            start_row = 2
+            end_row = start_row + len(matches) - 1
+            code_range = f"A{start_row}:A{end_row}"
+            fmt = sport_meta[base_sport]["format"]
+
+            try:
+                worksheet.format(code_range, fmt)
+            except Exception as e:
+                # Если форматирование не доступно/не хватает прав — не падаем,
+                # но оставляем буквы-коды в отдельной колонке.
+                print(f"⚠️ Не удалось применить форматирование для {base_sport} ({sheet_name}): {e}")
+
+            print(f"✅ Обновлено {len(matches)} матчей {base_sport} в Google Sheets ({sheet_name})!")
+        else:
             worksheet.append_rows([[teams, match_dt] for teams, match_dt in matches])
-            print(f"✅ Обновлено {len(matches)} матчей {sport} в Google Sheets ({sheet_name})!")
+            print(f"✅ Обновлено {len(matches)} матчей {base_sport} в Google Sheets ({sheet_name})!")
 
 if __name__ == "__main__":
     all_sports = {

@@ -253,25 +253,110 @@ def save_matches_to_file(sport, matches):
     print(f"📂 Матчи сохранены в {file_name}")
 
 def update_google_sheets(all_sports):
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    # `worksheet.format()` (цвета/оформление) использует Sheets API,
+    # поэтому добавляем актуальный scope для таблиц.
+    scope = [
+        "https://spreadsheets.google.com/feeds",
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
     creds = ServiceAccountCredentials.from_json_keyfile_name("credentials.json", scope)
     client = gspread.authorize(creds)
 
     sheet = client.open("pars")
 
-    for sheet_name in SHEET_NAMES.values():
+    # Код спорта + форматирование для первой колонки.
+    # Цвета в формате Sheets API: 0..1
+    sport_meta = {
+        "football": {
+            "code": "f",
+            "format": {
+                "backgroundColor": {"red": 0.2039, "green": 0.6588, "blue": 0.3255},  # #34A853
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+                "textFormat": {
+                    "bold": True,
+                    "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                },
+            },
+        },
+        "hockey": {
+            "code": "h",
+            "format": {
+                "backgroundColor": {"red": 0.2588, "green": 0.5216, "blue": 0.9569},  # #4285F4
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+                "textFormat": {
+                    "bold": True,
+                    "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                },
+            },
+        },
+        "tennis": {
+            "code": "t",
+            "format": {
+                "backgroundColor": {"red": 1, "green": 0.5961, "blue": 0},  # #FF9800
+                "horizontalAlignment": "CENTER",
+                "verticalAlignment": "MIDDLE",
+                "textFormat": {
+                    "bold": True,
+                    "foregroundColor": {"red": 1, "green": 1, "blue": 1},
+                },
+            },
+        },
+    }
+
+    # 1) Очистка листов + заголовки
+    for base_sport, sheet_name in SHEET_NAMES.items():
         worksheet = sheet.worksheet(sheet_name)
         worksheet.clear()
-        worksheet.append_row(["Матч", "Дата и время"])
+        if base_sport in sport_meta:
+            worksheet.append_row(["", "Матч", "Дата и время"])
+        else:
+            worksheet.append_row(["Матч", "Дата и время"])
         print(f"✅ Очистили лист {sheet_name} перед парсингом.")
 
-    for sport, matches in all_sports.items():
-        sheet_name = SHEET_NAMES.get(sport.replace("_night", ""), "Лист1")
-        worksheet = sheet.worksheet(sheet_name)
-
+    # 2) Склеиваем дневные + ночные матчи по базовому виду спорта,
+    # чтобы аппендить одним батчем и удобно форматировать диапазон.
+    combined = {k: [] for k in SHEET_NAMES.keys()}
+    for sport_key, matches in all_sports.items():
+        base = sport_key.replace("_night", "")
+        if base not in combined:
+            combined[base] = []
         if matches:
+            combined[base].extend(matches)
+
+    # 3) Запись + форматирование
+    for base_sport, matches in combined.items():
+        sheet_name = SHEET_NAMES.get(base_sport)
+        if not sheet_name:
+            continue
+
+        worksheet = sheet.worksheet(sheet_name)
+        if not matches:
+            continue
+
+        if base_sport in sport_meta:
+            code = sport_meta[base_sport]["code"]
+            worksheet.append_rows([[code, teams, match_dt] for teams, match_dt in matches])
+
+            # Форматируем только заполненные строки в колонке с кодом.
+            start_row = 2
+            end_row = start_row + len(matches) - 1
+            code_range = f"A{start_row}:A{end_row}"
+            fmt = sport_meta[base_sport]["format"]
+
+            try:
+                worksheet.format(code_range, fmt)
+            except Exception as e:
+                # Если форматирование не доступно/не хватает прав — не падаем,
+                # но оставляем буквы-коды в отдельной колонке.
+                print(f"⚠️ Не удалось применить форматирование для {base_sport} ({sheet_name}): {e}")
+
+            print(f"✅ Обновлено {len(matches)} матчей {base_sport} в Google Sheets ({sheet_name})!")
+        else:
             worksheet.append_rows([[teams, match_dt] for teams, match_dt in matches])
-            print(f"✅ Обновлено {len(matches)} матчей {sport} в Google Sheets ({sheet_name})!")
+            print(f"✅ Обновлено {len(matches)} матчей {base_sport} в Google Sheets ({sheet_name})!")
 
 if __name__ == "__main__":
     all_sports = {

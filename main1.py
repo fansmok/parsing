@@ -265,43 +265,34 @@ def update_google_sheets(all_sports):
 
     sheet = client.open("pars")
 
-    # Код спорта + форматирование для первой колонки.
+    # Код спорта + форматирование колонки "Матч" (без отдельной колонки).
     # Цвета в формате Sheets API: 0..1
     sport_meta = {
         "football": {
             "code": "f",
             "format": {
-                "backgroundColor": {"red": 0.2039, "green": 0.6588, "blue": 0.3255},  # #34A853
-                "horizontalAlignment": "CENTER",
+                # Material Light Green 200 (#C8E6C9)
+                "backgroundColor": {"red": 0.7843, "green": 0.9020, "blue": 0.7882},
+                "horizontalAlignment": "LEFT",
                 "verticalAlignment": "MIDDLE",
-                "textFormat": {
-                    "bold": True,
-                    "foregroundColor": {"red": 1, "green": 1, "blue": 1},
-                },
             },
         },
         "hockey": {
             "code": "h",
             "format": {
-                "backgroundColor": {"red": 0.2588, "green": 0.5216, "blue": 0.9569},  # #4285F4
-                "horizontalAlignment": "CENTER",
+                # Material Light Blue 200 (#BBDEFB)
+                "backgroundColor": {"red": 0.7333, "green": 0.8706, "blue": 0.9843},
+                "horizontalAlignment": "LEFT",
                 "verticalAlignment": "MIDDLE",
-                "textFormat": {
-                    "bold": True,
-                    "foregroundColor": {"red": 1, "green": 1, "blue": 1},
-                },
             },
         },
         "tennis": {
             "code": "t",
             "format": {
-                "backgroundColor": {"red": 1, "green": 0.5961, "blue": 0},  # #FF9800
-                "horizontalAlignment": "CENTER",
+                # Material Orange 200 (#FFE0B2)
+                "backgroundColor": {"red": 1.0, "green": 0.8784, "blue": 0.6980},
+                "horizontalAlignment": "LEFT",
                 "verticalAlignment": "MIDDLE",
-                "textFormat": {
-                    "bold": True,
-                    "foregroundColor": {"red": 1, "green": 1, "blue": 1},
-                },
             },
         },
     }
@@ -310,10 +301,7 @@ def update_google_sheets(all_sports):
     for base_sport, sheet_name in SHEET_NAMES.items():
         worksheet = sheet.worksheet(sheet_name)
         worksheet.clear()
-        if base_sport in sport_meta:
-            worksheet.append_row(["", "Матч", "Дата и время"])
-        else:
-            worksheet.append_row(["Матч", "Дата и время"])
+        worksheet.append_row(["Матч", "Дата и время"])
         print(f"✅ Очистили лист {sheet_name} перед парсингом.")
 
     # 2) Склеиваем дневные + ночные матчи по базовому виду спорта,
@@ -338,19 +326,19 @@ def update_google_sheets(all_sports):
 
         if base_sport in sport_meta:
             code = sport_meta[base_sport]["code"]
-            worksheet.append_rows([[code, teams, match_dt] for teams, match_dt in matches])
+            worksheet.append_rows([[f"{code} {teams}", match_dt] for teams, match_dt in matches])
 
-            # Форматируем только заполненные строки в колонке с кодом.
+            # Форматируем только заполненные строки в колонке "Матч".
             start_row = 2
             end_row = start_row + len(matches) - 1
-            code_range = f"A{start_row}:A{end_row}"
+            match_range = f"A{start_row}:A{end_row}"
             fmt = sport_meta[base_sport]["format"]
 
             try:
-                worksheet.format(code_range, fmt)
+                worksheet.format(match_range, fmt)
             except Exception as e:
                 # Если форматирование не доступно/не хватает прав — не падаем,
-                # но оставляем буквы-коды в отдельной колонке.
+                # но оставляем буквы-коды в тексте матча.
                 print(f"⚠️ Не удалось применить форматирование для {base_sport} ({sheet_name}): {e}")
 
             print(f"✅ Обновлено {len(matches)} матчей {base_sport} в Google Sheets ({sheet_name})!")

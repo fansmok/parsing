@@ -343,7 +343,9 @@ def update_google_sheets(all_sports):
             pass
 
         if base_sport in sport_meta:
-            worksheet.append_row(["", "Матч", "Дата и время"])
+            # Важно: A1 не должна быть пустой, иначе при append_rows Google Sheets
+            # может считать таблицу начинающейся с B1 и все значения сдвинутся вправо.
+            worksheet.append_row(["Код", "Матч", "Дата и время"])
         else:
             worksheet.append_row(["Матч", "Дата и время"])
         print(f"✅ Очистили лист {sheet_name} перед парсингом.")
